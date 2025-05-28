@@ -13,16 +13,27 @@ print(os.getenv("OPENAI_API_KEY"))
 async def generate_review_comment(diff: str) -> str:
     url = "http://localhost:11434/api/generate"
     prompt = (
-        "You are a senior code reviewer. Review the following GitHub pull request diff and provide helpful, concise feedback.\n\n"
-        f"{diff[:4000]}"
+    "You are a senior software engineer and code reviewer. "
+    "Given the following unified diff from a GitHub pull request, provide a detailed review with the following instructions:\n"
+    "- For each change, reference the file and line number(s) if possible.\n"
+    "- Point out any bugs, anti-patterns, typos, or style issues.\n"
+    "- Suggest improvements for code quality, maintainability, security, and best practices.\n"
+    "- Highlight any particularly good or clever changes.\n"
+    "- If you see suspicious or accidental changes (such as stray text or syntax errors), call them out specifically.\n"
+    "- Skip unchanged or trivial changes.\n"
+    "- Respond in a concise, professional tone.\n"
+    "- End with a brief summary of your overall impression of the changes.\n\n"
+    "GitHub PR Diff:\n"
+    f"{diff[:4000]}"
     )
+    print("Prompt sent to Ollama:\n", prompt)
     data = {
-        "model": "llama3.2",
+        "model": "codellama:13b",
         "prompt": prompt,
         "stream": False
     }
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.post(url, json=data)
         resp.raise_for_status()
         result = resp.json()
