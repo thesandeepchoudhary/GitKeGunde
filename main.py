@@ -8,6 +8,37 @@ import os
 app = FastAPI()
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "YOUR_GITHUB_ACCESS_TOKEN")
+print(os.getenv("OPENAI_API_KEY"))
+
+async def generate_review_comment(diff: str) -> str:
+    url = "http://localhost:11434/api/generate"
+    prompt = (
+        "You are a senior code reviewer. Review the following GitHub pull request diff and provide helpful, concise feedback.\n\n"
+        f"{diff[:4000]}"
+    )
+    data = {
+        "model": "llama3.2",
+        "prompt": prompt,
+        "stream": False
+    }
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(url, json=data)
+        resp.raise_for_status()
+        result = resp.json()
+        return result["response"].strip()
+
+
+async def get_pr_diff(repo_full_name: str, pr_number: int, token: str) -> str:
+    url = f"https://api.github.com/repos/{repo_full_name}/pulls/{pr_number}"
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3.diff",
+    }
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(url, headers=headers)
+        resp.raise_for_status()
+        return resp.text
 
 async def find_pr_number(repo_full_name: str, branch: str, token: str) -> int | None:
     url = f"https://api.github.com/repos/{repo_full_name}/pulls"
@@ -67,7 +98,13 @@ async def webhook_handler(request: Request):
     if not pr_number:
         return JSONResponse(content={"message": f"No open PR found for branch {branch}"}, status_code=200)
 
-    comment_text = "Hello! This is an automated comment from the webhook."
+     # Fetch PR diff
+    diff = await get_pr_diff(repo_full_name, pr_number, GITHUB_TOKEN)
+    #comment_text = "Hello! This is an automated comment from the webhook."
+
+       # Generate comment using OpenAI
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY")
+    comment_text = await generate_review_comment(diff)
 
     try:
         comment_resp = await post_pr_comment(repo_full_name, pr_number, GITHUB_TOKEN, comment_text)
@@ -78,3 +115,7 @@ async def webhook_handler(request: Request):
         "message": f"Comment posted on PR #{pr_number}",
         "comment": comment_resp,
     }
+
+@app.get("/")
+async def root():
+    return {"message": "GitKeGunde server is running."}
