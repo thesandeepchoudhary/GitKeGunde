@@ -7,6 +7,11 @@ import os
 import openai
 import re
 import pprint
+import subprocess
+import tempfile
+import shutil
+import base64
+from datetime import datetime
 
 # Initialize GPT client (LiteLLM proxy)
 gptClient = openai.OpenAI(
@@ -170,6 +175,52 @@ async def post_pr_comment(repo_full_name: str, pr_number: int, token: str, comme
         resp.raise_for_status()
         return resp.json()
 
+
+def apply_suggestions_locally(repo_url: str, base_branch: str, file_suggestions: dict):
+    tmp_dir = tempfile.mkdtemp()
+    try:
+        subprocess.run(["git", "clone", "--branch", base_branch, f"https://x-access-token:{GITHUB_TOKEN}@github.com/{repo_url}.git", tmp_dir], check=True)
+        subprocess.run(["git", "checkout", "-b", "auto-fix-" + datetime.now().strftime("%Y%m%d%H%M%S")], cwd=tmp_dir, check=True)
+
+        for file_path, changes in file_suggestions.items():
+            full_path = os.path.join(tmp_dir, file_path)
+            if not os.path.exists(full_path):
+                continue
+            with open(full_path, "r") as f:
+                lines = f.readlines()
+            for line_num, suggestion in changes.items():
+                if 0 < line_num <= len(lines):
+                    lines[line_num - 1] = suggestion + "\n"
+            with open(full_path, "w") as f:
+                f.writelines(lines)
+
+        subprocess.run(["git", "config", "user.name", "AutoBot"], cwd=tmp_dir)
+        subprocess.run(["git", "config", "user.email", "autobot@example.com"], cwd=tmp_dir)
+        subprocess.run(["git", "add", "."], cwd=tmp_dir)
+        subprocess.run(["git", "commit", "-m", "chore: apply suggested changes from review"], cwd=tmp_dir)
+        subprocess.run(["git", "push", "--set-upstream", "origin", "HEAD"], cwd=tmp_dir)
+        result = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=tmp_dir, stdout=subprocess.PIPE)
+        new_branch = result.stdout.decode().strip()
+        return new_branch
+    finally:
+        shutil.rmtree(tmp_dir)
+
+
+async def create_new_pr(repo: str, new_branch: str, base_branch: str, token: str):
+    url = f"https://api.github.com/repos/{repo}/pulls"
+    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
+    payload = {
+        "title": "Automated Fix: Suggested Code Improvements",
+        "head": new_branch,
+        "base": base_branch,
+        "body": "This PR contains automated fixes based on GPT code review suggestions."
+    }
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(url, headers=headers, json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+
 @app.post("/")
 async def webhook_handler(request: Request):
     try:
@@ -189,11 +240,13 @@ async def webhook_handler(request: Request):
     head_sha = None
     pr_title = ""
     pr_description = ""
+    base_branch = ""
 
     if "pull_request" in payload_dict:
         pr = payload_dict["pull_request"]
         pr_number = pr.get("number")
         head_sha = pr.get("head", {}).get("sha")
+        base_branch = pr.get("base", {}).get("ref", "")
         pr_title = pr.get("title", "")
         pr_description = pr.get("body", "")
     elif "ref" in payload_dict:
@@ -206,10 +259,15 @@ async def webhook_handler(request: Request):
             return JSONResponse(content={"message": f"No open PR found for branch {branch}"}, status_code=200)
         pr_metadata = await get_pr_metadata(repo_full_name, pr_number, GITHUB_TOKEN)
         head_sha = pr_metadata.get("head", {}).get("sha")
+        base_branch = pr_metadata.get("base", {}).get("ref")
         pr_title = pr_metadata.get("title", "")
         pr_description = pr_metadata.get("body", "")
+        print("Reached push event")
     else:
         return JSONResponse(content={"message": "Event ignored: not a PR or push event."}, status_code=200)
+
+    if branch.startswith("auto-fix-"):
+        return JSONResponse(content={"message": "Event ignored: This is auto-fix PR"}, status_code=200)
 
     if not repo_full_name or not pr_number:
         raise HTTPException(status_code=400, detail="Missing repository info or PR number")
@@ -234,6 +292,7 @@ async def webhook_handler(request: Request):
     comment_resp = await post_pr_comment(repo_full_name, pr_number, GITHUB_TOKEN, comment_text)
 
     blocks = comment_text.split("File:")
+    file_suggestions = {}
     for block in blocks[1:]:
         lines = block.strip().splitlines()
         current_file = lines[0].strip()
@@ -278,5 +337,10 @@ async def webhook_handler(request: Request):
                 print(f"Failed to post inline comment on {current_file} line {line_num}: {e}")
         else:
             print(f"Could not map file/line to diff position: {current_file} line {line_num}")
+        if current_file and line_num and suggestion_code:
+            file_suggestions.setdefault(current_file, {})[line_num] = suggestion_code
+
+    new_branch = apply_suggestions_locally(repo_full_name, branch, file_suggestions)
+    pr = await create_new_pr(repo_full_name, new_branch, branch, GITHUB_TOKEN)
 
     return {"message": f"Comment posted on PR #{pr_number}", "comment": comment_resp}
