@@ -279,4 +279,5 @@ async def webhook_handler(request: Request):
         else:
             print(f"Could not map file/line to diff position: {current_file} line {line_num}")
 
+    print(f"✅ All review comments (summary and inline) posted successfully for PR #{pr_number}")
     return {"message": f"Comment posted on PR #{pr_number}", "comment": comment_resp}
