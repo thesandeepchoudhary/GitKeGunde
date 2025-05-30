@@ -249,6 +249,7 @@ async def webhook_handler(request: Request):
         base_branch = pr.get("base", {}).get("ref", "")
         pr_title = pr.get("title", "")
         pr_description = pr.get("body", "")
+        branch = pr.get("head", {}).get("ref", "")
     elif "ref" in payload_dict:
         ref = payload_dict.get("ref")
         branch = ref.split("/")[-1]
